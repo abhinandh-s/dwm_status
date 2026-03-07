@@ -1,0 +1,16 @@
+[package]
+name = "slstatus"
+version = "0.1.0"
+edition = "2024"
+description = "A status bar for tiling window managers with pretty unicode symbols written in rust"
+authors = ["Abhinandh S <abhinandhsuby@proton.me>"]
+license = "MIT"
+
+[dependencies]
+chan = "0.1.23"
+chan-signal = "0.3.3"
+chrono = "0.4.44"
+notify-rust = "4.12"
+systemstat = "0.2.6"
+zbus = { version = "5.14.0", features = ["blocking"] }
+x11rb = "0.13.2"
