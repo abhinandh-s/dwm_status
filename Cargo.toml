@@ -7,9 +7,11 @@ authors = ["Abhinandh S <abhinandhsuby@proton.me>"]
 license = "MIT"
 
 [dependencies]
+libc = "0.2.182"
 chan = "0.1.23"
 chan-signal = "0.3.3"
 chrono = "0.4.44"
+mpd = "0.1.0"
 notify-rust = "4.12"
 systemstat = "0.2.6"
 zbus = { version = "5.14.0", features = ["blocking"] }

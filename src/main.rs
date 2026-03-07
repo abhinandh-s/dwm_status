@@ -1,6 +1,4 @@
-#![allow(unused)]
-
-use std::fmt::Display;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +12,36 @@ extern crate systemstat;
 
 use chan_signal::Signal;
 use systemstat::{Platform, System};
+
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::*;
+use x11rb::rust_connection::RustConnection;
+
+struct StatusBar {
+    conn: RustConnection,
+    root: u32,
+}
+
+impl StatusBar {
+    fn new() -> Self {
+        let (conn, screen_num) = x11rb::connect(None).expect("failed to connect to X11");
+        let root = conn.setup().roots[screen_num].root;
+        Self { conn, root }
+    }
+
+    fn update(&self, s: &str) {
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                self.root,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                s.as_bytes(),
+            )
+            .ok();
+        self.conn.flush().ok();
+    }
+}
 
 pub const SPARKLINE: &str = "⠁⠂⠄⡀";
 pub const NF_PLE_LOWER_RIGHT_TRIANGLE: &str = "";
@@ -57,30 +85,51 @@ impl Plugin for User {
     // }
 }
 
+const KB: u64 = 1024;
+const MB: u64 = KB * 1024;
+const GB: u64 = MB * 1024;
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else {
+        format!("{:.1} KB", bytes / KB)
+    }
+}
+
+static LAST_RX: AtomicU64 = AtomicU64::new(0);
+static LAST_TX: AtomicU64 = AtomicU64::new(0);
+
 fn plugged(sys: &System) -> String {
-    if let Ok(plugged) = sys.on_ac_power() {
-        if plugged {
-            "🔌 ✓".to_string()
-        } else {
-            "🔌 ✘".to_string()
-        }
-    } else {
-        "🔌".to_string()
-    }
+    let (current_rx, current_tx) = sys
+        .network_stats("wlan0")
+        .map_or((0, 0), |s| (s.rx_bytes.as_u64(), s.tx_bytes.as_u64()));
+
+    // Calculate delta (current - previous)
+    // We use swap to update the static and get the old value in one go
+    let old_rx = LAST_RX.swap(current_rx, Ordering::Relaxed);
+    let old_tx = LAST_TX.swap(current_tx, Ordering::Relaxed);
+
+    // If it's the first run or stats reset, speed is 0
+    let rx_speed = current_rx.saturating_sub(old_rx);
+    let tx_speed = current_tx.saturating_sub(old_tx);
+
+    // Note: Since your loop runs every 500ms, multiply by 2 to get bytes per second
+    // or just leave it as 'per update' for simplicity.
+    // Let's assume per second:
+    format!(
+        " [   {}/s ][  {}/s",
+        format_bytes(rx_speed * 2),
+        format_bytes(tx_speed * 2)
+    )
 }
 
-fn battery(sys: &System) -> String {
-    if let Ok(bat) = sys.battery_life() {
-        format!("🔋 {:.1}%", bat.remaining_capacity * 100.)
-    } else {
-        "".to_string()
-    }
-}
-
-struct Ram {
-    total: u64,
-    usage: u64,
-    free: u64,
+pub struct Ram {
+    pub total: u64,
+    pub usage: u64,
+    pub free: u64,
 }
 
 impl Ram {
@@ -93,10 +142,6 @@ impl Ram {
         });
 
         Self { total, usage, free }
-    }
-
-    fn set_usage(&mut self, usage: u64) {
-        self.usage = usage;
     }
 
     fn usage_as_bytes(&self) -> u64 {
@@ -116,14 +161,27 @@ impl Ram {
     }
 }
 
-pub const RAM_ICON: &str = "   ";
+pub trait Cs {
+    fn as_kilobytes(&self) -> u64;
+    fn as_megabytes(&self) -> u64;
+    fn as_gigabytes(&self) -> u64;
+}
 
-impl Display for Ram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let usage = self.usage_as_gigabytes();
-        write!(f, "{} {} GB", RAM_ICON, usage)
+impl Cs for u64 {
+    fn as_kilobytes(&self) -> u64 {
+        self.saturating_div(1024)
+    }
+
+    fn as_megabytes(&self) -> u64 {
+        self.as_kilobytes().saturating_div(1024)
+    }
+
+    fn as_gigabytes(&self) -> u64 {
+        self.as_megabytes().saturating_div(1024)
     }
 }
+
+pub const RAM_ICON: &str = "   ";
 
 fn ram(sys: &System) -> String {
     let r = Ram::new(sys).usage_as_gigabytes();
@@ -140,14 +198,23 @@ fn cpu(sys: &System) -> String {
 
 fn date() -> String {
     chrono::Local::now()
-        .format("   %a, %d %h  |  󰥔   %R    ")
+        .format("   %a, %d %h  ~  󰥔   %R ]    ")
         .to_string()
 }
 
 fn separated(s: String) -> String {
-    if s.is_empty() { s } else { s + "  |  " }
+    if s.is_empty() { s } else { s + "   ][   " }
 }
 
+use slstatus::{Icons, rand_num};
+
+fn music() -> String {
+    let r = slstatus::mpd();
+    format!("{}     {}", Icons::MUSIC, r)
+}
+fn start() -> String {
+    "[   ".to_owned()
+}
 fn status(sys: &System) -> String {
     let user = User::new("Charlie")
         .edit(|user| {
@@ -155,8 +222,9 @@ fn status(sys: &System) -> String {
         })
         .render();
 
-    separated(plugged(sys))
-        + &separated(Ram::new(sys).usage_as_gigabytes().to_string())
+    start() + &separated(music())
+    + &separated(plugged(sys))
+        + &separated(ram(sys))
         + &separated(cpu(sys))
         + &separated(rand_num())
         + &separated(user)
@@ -165,95 +233,20 @@ fn status(sys: &System) -> String {
 
 use x11rb::wrapper::ConnectionExt;
 
-fn update_status(s: &str) {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::*;
-    if let Ok((conn, screen_num)) = x11rb::connect(None) {
-        let screen = &conn.setup().roots[screen_num];
-        let root = screen.root;
-        conn.change_property8(
-            PropMode::REPLACE,
-            root,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            s.as_bytes(),
-        )
-        .ok();
-        conn.flush().ok();
-    }
-}
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use zbus::zvariant::OwnedValue;
-use zbus::{blocking::connection, interface};
 
-struct NotifServer {
-    sender: std::sync::mpsc::SyncSender<(String, String, i32)>,
-    id: Mutex<u32>,
-}
-
-#[allow(clippy::too_many_arguments)]
-#[interface(name = "org.freedesktop.Notifications")]
-impl NotifServer {
-    fn notify(
-        &self,
-        _app_name: String,
-        _replaces_id: u32,
-        _app_icon: String,
-        summary: String,
-        body: String,
-        _actions: Vec<String>,
-        _hints: HashMap<String, OwnedValue>,
-        expire_timeout: i32,
-    ) -> u32 {
-        self.sender.send((summary, body, expire_timeout)).ok();
-        let mut id = self.id.lock().unwrap();
-        *id += 1;
-        *id
-    }
-
-    fn close_notification(&self, _id: u32) {}
-
-    fn get_capabilities(&self) -> Vec<String> {
-        vec!["body".into()]
-    }
-
-    fn get_server_information(&self) -> (&str, &str, &str, &str) {
-        ("slstatus", "slstatus", "0.1.0", "1.2")
-    }
-}
-
-fn run(_sdone: chan::Sender<()>) {
+fn run(_sdone: chan::Sender<()>, bar: &StatusBar) {
     let sys = System::new();
     let (sender, receiver) = std::sync::mpsc::sync_channel::<(String, String, i32)>(8);
 
-    std::thread::spawn(move || {
-        let server = NotifServer {
-            sender,
-            id: Mutex::new(0),
-        };
-
-        let _conn = connection::Builder::session()
-            .expect("session bus failed")
-            .name("org.freedesktop.Notifications")
-            .expect("name already taken — stop dunst/mako first")
-            .serve_at("/org/freedesktop/Notifications", server)
-            .expect("serve_at failed")
-            .build()
-            .expect("connection build failed");
-
-        // Keep thread alive — _conn must not drop
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
-    });
+    // FIFO listener thread (from previous answer)
+    std::thread::spawn(move || notify_pipe_listener(sender));
 
     let mut banner = String::new();
     loop {
         if let Ok((summary, body, timeout)) = receiver.try_recv() {
             banner = format!("{} {}", summary, body);
-            update_status(&banner);
+            bar.update(&banner);
             const MAX_TIMEOUT: i32 = 60_000;
             let t = if timeout <= 0 || timeout > MAX_TIMEOUT {
                 MAX_TIMEOUT
@@ -265,40 +258,59 @@ fn run(_sdone: chan::Sender<()>) {
         let next_banner = status(&sys);
         if next_banner != banner {
             banner = next_banner;
-            update_status(&banner);
+            bar.update(&banner);
         }
         thread::sleep(Duration::from_millis(500));
     }
 }
 
 fn main() {
-    // Signal gets a value when the OS sent a INT or TERM signal.
+    let bar = std::sync::Arc::new(StatusBar::new());
     let signal = chan_signal::notify(&[Signal::INT, Signal::TERM]);
-    // When our work is complete, send a sentinel value on `sdone`.
     let (sdone, rdone) = chan::sync(0);
-    // Run work.
-    std::thread::spawn(move || run(sdone));
 
-    // Wait for a signal or for work to be done.
+    let bar_run = bar.clone();
+    std::thread::spawn(move || run(sdone, &bar_run));
+
     chan_select! {
         signal.recv() -> signal => {
-            update_status(&format!("rust-dwm-status stopped with signal {:?}.", signal));
+            bar.update(&format!("rust-dwm-status stopped with signal {:?}.", signal));
         },
         rdone.recv() => {
-            update_status("rust-dwm-status: done.");
+            bar.update("rust-dwm-status: done.");
         }
     }
 }
 
-use std::sync::atomic::{AtomicU64, Ordering};
+// Remove ALL zbus imports and the NotifServer struct entirely.
+// Replace the channel + thread + zbus block in run() with this:
 
-static STATE: AtomicU64 = AtomicU64::new(0x517cc1b727220a95);
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
 
-fn rand_num() -> String {
-    let mut x = STATE.load(Ordering::Relaxed);
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    STATE.store(x, Ordering::Relaxed);
-    format!("  {}", x % 1000 + 1)
+fn notify_pipe_listener(sender: std::sync::mpsc::SyncSender<(String, String, i32)>) {
+    let path = "/tmp/dwm-notify";
+
+    // Create the FIFO if it doesn't exist
+    if !std::path::Path::new(path).exists() {
+        unsafe {
+            let cpath = std::ffi::CString::new(path).unwrap();
+            libc::mkfifo(cpath.as_ptr(), 0o622);
+        }
+    }
+
+    loop {
+        // open() blocks until a writer connects — that's intentional
+        if let Ok(file) = OpenOptions::new().read(true).open(path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                // Format: "SUMMARY\tBODY\tTIMEOUT_MS"  or just "SUMMARY"
+                let mut parts = line.splitn(3, '\t');
+                let summary = parts.next().unwrap_or("").to_string();
+                let body = parts.next().unwrap_or("").to_string();
+                let timeout = parts.next().and_then(|t| t.parse().ok()).unwrap_or(5000);
+                sender.send((summary, body, timeout)).ok();
+            }
+        }
+    }
 }
