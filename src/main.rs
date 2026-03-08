@@ -47,29 +47,29 @@ pub const SPARKLINE: &str = "⠁⠂⠄⡀";
 pub const NF_PLE_LOWER_RIGHT_TRIANGLE: &str = "";
 pub const NF_PLE_LOWER_LEFT_TRIANGLE: &str = "";
 
-trait Plugin {
+pub trait Plugin {
     fn render(&self) -> String;
     // Required to return 'Self' by value
     fn edit<F: FnOnce(&mut Self) + Sized>(self, f: F) -> Self;
 }
 
-struct User {
+pub struct User {
     name: String,
 }
 
 impl User {
-    fn new(name: &str) -> Self {
+    pub fn new(name: &str) -> Self {
         Self { name: name.into() }
     }
 
-    fn set_name(&mut self, name: &str) {
+    pub fn set_name(&mut self, name: &str) {
         self.name = name.to_owned();
     }
 }
 
 impl Plugin for User {
     fn render(&self) -> String {
-        format!("  {}'s Arch Linux", self.name)
+        fmt_with_sep!(" {}'s Arch Linux", self.name)
     }
 
     fn edit<F: FnOnce(&mut Self) + Sized>(mut self, f: F) -> Self {
@@ -119,10 +119,13 @@ fn plugged(sys: &System) -> String {
     // Note: Since your loop runs every 500ms, multiply by 2 to get bytes per second
     // or just leave it as 'per update' for simplicity.
     // Let's assume per second:
-    format!(
-        " [   {}/s ][  {}/s",
+    fmt_with_sep!(
+        "{} {}/s {} {} {}/s",
+        Icons::ARROW_DOWN_THICK,
         format_bytes(rx_speed * 2),
-        format_bytes(tx_speed * 2)
+        Seperator::Mid,
+        Icons::ARROW_UP_THICK,
+        format_bytes(tx_speed * 2),
     )
 }
 
@@ -181,59 +184,49 @@ impl Cs for u64 {
     }
 }
 
-pub const RAM_ICON: &str = "   ";
-
 fn ram(sys: &System) -> String {
     let r = Ram::new(sys).usage_as_gigabytes();
-    format!("{} {} GB", RAM_ICON, r)
+    fmt_with_sep!("{}  {} GB", Icons::RAM, r,)
 }
 
 fn cpu(sys: &System) -> String {
     if let Ok(load) = sys.load_average() {
-        format!("⚙ CPU: {:.2}", load.one)
+        fmt_with_sep!("  {:.2}", load.one)
     } else {
         "⚙ _".to_string()
     }
 }
 
+fn cpu_heat(sys: &System) -> String {
+    if let Ok(load) = sys.cpu_temp() {
+        fmt_with_sep!("{} {:.2}", Icons::FIRE, load)
+    } else {
+        "".to_string()
+    }
+}
+
 fn date() -> String {
     chrono::Local::now()
-        .format("   %a, %d %h  ~  󰥔   %R ]    ")
+        .format("[  %a, %d %h ~ 󰥔 %R ]  ")
         .to_string()
 }
 
-fn separated(s: String) -> String {
-    if s.is_empty() { s } else { s + "   ][   " }
-}
-
-use slstatus::{Icons, rand_num};
+use slstatus::{Icons, Seperator, fmt_with_sep};
 
 fn music() -> String {
-    let r = slstatus::mpd();
-    format!("{}     {}", Icons::MUSIC, r)
+    slstatus::mpd().map_or(String::new(), |music| {
+        fmt_with_sep!("{}  {}", Icons::MUSIC, music)
+    })
 }
+
 fn start() -> String {
-    "[   ".to_owned()
+    " ".to_owned()
 }
 fn status(sys: &System) -> String {
-    let user = User::new("Charlie")
-        .edit(|user| {
-            user.set_name("Abhi");
-        })
-        .render();
-
-    start() + &separated(music())
-    + &separated(plugged(sys))
-        + &separated(ram(sys))
-        + &separated(cpu(sys))
-        + &separated(rand_num())
-        + &separated(user)
-        + &date()
+    start() + &music() + &plugged(sys) + &ram(sys) + &cpu(sys) + &cpu_heat(sys) + &date()
 }
 
 use x11rb::wrapper::ConnectionExt;
-
-
 
 fn run(_sdone: chan::Sender<()>, bar: &StatusBar) {
     let sys = System::new();

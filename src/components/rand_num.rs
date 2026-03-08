@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::fmt_with_sep;
+
 static STATE: AtomicU64 = AtomicU64::new(0x517cc1b727220a95);
 
 pub fn rand_num() -> String {
@@ -14,5 +16,5 @@ pub fn rand_num() -> String {
             Err(current) => old = current, // retry with updated value
         }
     };
-    format!("  {}", new % 1000 + 1)
+    fmt_with_sep!("{}", new % 1000 + 1)
 }
