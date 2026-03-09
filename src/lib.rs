@@ -17,6 +17,9 @@ impl Icons {
     pub const TRIANGLE_DOWN: &str = "";
     pub const ARROW_UP_THICK: &str = "󰁞";
     pub const ARROW_DOWN_THICK: &str = "󰁆";
+    pub const SPARKLINE: &str = "⠁⠂⠄⡀";
+    pub const NF_PLE_LOWER_RIGHT_TRIANGLE: &str = "";
+    pub const NF_PLE_LOWER_LEFT_TRIANGLE: &str = "";
 }
 
 pub enum Seperator {
@@ -46,3 +49,19 @@ macro_rules! fmt_with_sep {
         s
     }}
 }
+
+const KB: u64 = 1024;
+const MB: u64 = KB * 1024;
+const GB: u64 = MB * 1024;
+
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else {
+        format!("{:.1} KB", bytes / KB)
+    }
+}
+
+

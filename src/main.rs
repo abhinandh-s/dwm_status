@@ -1,15 +1,8 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::thread;
 use std::time::Duration;
 
-#[macro_use]
-extern crate chan;
-extern crate chan_signal;
-
-extern crate chrono;
-extern crate notify_rust;
-extern crate systemstat;
-
+use chan::chan_select;
 use chan_signal::Signal;
 use systemstat::{Platform, System};
 
@@ -43,10 +36,6 @@ impl StatusBar {
     }
 }
 
-pub const SPARKLINE: &str = "⠁⠂⠄⡀";
-pub const NF_PLE_LOWER_RIGHT_TRIANGLE: &str = "";
-pub const NF_PLE_LOWER_LEFT_TRIANGLE: &str = "";
-
 pub trait Plugin {
     fn render(&self) -> String;
     // Required to return 'Self' by value
@@ -76,142 +65,50 @@ impl Plugin for User {
         f(&mut self);
         self
     }
+}
+use slstatus::{Cpu, Icons, date, fmt_with_sep, network_speed, ram};
 
-    // fn edit<F>(&mut self, f: F)
-    // where
-    //     F: FnOnce(&mut Self),
-    // {
-    //     self.name = f(self)
-    // }
+pub struct Spinner {
+    frames: &'static [&'static str],
+    index: usize,
 }
 
-const KB: u64 = 1024;
-const MB: u64 = KB * 1024;
-const GB: u64 = MB * 1024;
+impl Spinner {
+    pub fn new() -> Self {
+        Self {
+            frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+            index: 0,
+        }
+    }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= GB {
-        format!("{:.1} GB", bytes / GB)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes / MB)
-    } else {
-        format!("{:.1} KB", bytes / KB)
+    pub fn tick(&mut self) -> &'static str {
+        let frame = self.frames[self.index];
+        self.index = (self.index + 1) % self.frames.len();
+        frame
     }
 }
 
-static LAST_RX: AtomicU64 = AtomicU64::new(0);
-static LAST_TX: AtomicU64 = AtomicU64::new(0);
-
-fn plugged(sys: &System) -> String {
-    let (current_rx, current_tx) = sys
-        .network_stats("wlan0")
-        .map_or((0, 0), |s| (s.rx_bytes.as_u64(), s.tx_bytes.as_u64()));
-
-    // Calculate delta (current - previous)
-    // We use swap to update the static and get the old value in one go
-    let old_rx = LAST_RX.swap(current_rx, Ordering::Relaxed);
-    let old_tx = LAST_TX.swap(current_tx, Ordering::Relaxed);
-
-    // If it's the first run or stats reset, speed is 0
-    let rx_speed = current_rx.saturating_sub(old_rx);
-    let tx_speed = current_tx.saturating_sub(old_tx);
-
-    // Note: Since your loop runs every 500ms, multiply by 2 to get bytes per second
-    // or just leave it as 'per update' for simplicity.
-    // Let's assume per second:
-    fmt_with_sep!(
-        "{} {}/s {} {} {}/s",
-        Icons::ARROW_DOWN_THICK,
-        format_bytes(rx_speed * 2),
-        Seperator::Mid,
-        Icons::ARROW_UP_THICK,
-        format_bytes(tx_speed * 2),
-    )
-}
-
-pub struct Ram {
-    pub total: u64,
-    pub usage: u64,
-    pub free: u64,
-}
-
-impl Ram {
-    fn new(sys: &System) -> Self {
-        let (total, usage, free) = sys.memory().map_or((0, 0, 0), |m| {
-            let t = m.total.0;
-            let f = m.free.0;
-            let u = t - f;
-            (t, u, f)
-        });
-
-        Self { total, usage, free }
-    }
-
-    fn usage_as_bytes(&self) -> u64 {
-        self.usage
-    }
-
-    fn usage_as_kilobytes(&self) -> u64 {
-        self.usage_as_bytes().saturating_div(1024)
-    }
-
-    fn usage_as_megabytes(&self) -> u64 {
-        self.usage_as_kilobytes().saturating_div(1024)
-    }
-
-    fn usage_as_gigabytes(&self) -> u64 {
-        self.usage_as_megabytes().saturating_div(1024)
+impl Default for Spinner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-pub trait Cs {
-    fn as_kilobytes(&self) -> u64;
-    fn as_megabytes(&self) -> u64;
-    fn as_gigabytes(&self) -> u64;
+// The global frame counter
+static TICKER: AtomicUsize = AtomicUsize::new(0);
+
+// Animation frames constant
+const SPINNER_FRAMES: &[&str] = &[" ", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"];
+
+// ["[    ]", "[=   ]", "[==  ]", "[=== ]", "[ ===]", "[  ==]", "[   =]", "[    ]"]
+// Bouncing ["[ ]", "[= ]", "[== ]", "[=== ]", "[ ===]", "[ ==]", "[ =]", "[ ]"]
+// [" ", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"]
+pub const SPINNER_FRAMES_2: &[&str] = &["○", "◎", "●", "◎"];
+
+fn get_spinner() -> &'static str {
+    let i = TICKER.load(std::sync::atomic::Ordering::Relaxed);
+    SPINNER_FRAMES[i % SPINNER_FRAMES.len()]
 }
-
-impl Cs for u64 {
-    fn as_kilobytes(&self) -> u64 {
-        self.saturating_div(1024)
-    }
-
-    fn as_megabytes(&self) -> u64 {
-        self.as_kilobytes().saturating_div(1024)
-    }
-
-    fn as_gigabytes(&self) -> u64 {
-        self.as_megabytes().saturating_div(1024)
-    }
-}
-
-fn ram(sys: &System) -> String {
-    let r = Ram::new(sys).usage_as_gigabytes();
-    fmt_with_sep!("{}  {} GB", Icons::RAM, r,)
-}
-
-fn cpu(sys: &System) -> String {
-    if let Ok(load) = sys.load_average() {
-        fmt_with_sep!("  {:.2}", load.one)
-    } else {
-        "⚙ _".to_string()
-    }
-}
-
-fn cpu_heat(sys: &System) -> String {
-    if let Ok(load) = sys.cpu_temp() {
-        fmt_with_sep!("{} {:.2}", Icons::FIRE, load)
-    } else {
-        "".to_string()
-    }
-}
-
-fn date() -> String {
-    chrono::Local::now()
-        .format("[  %a, %d %h ~ 󰥔 %R ]  ")
-        .to_string()
-}
-
-use slstatus::{Icons, Seperator, fmt_with_sep};
 
 fn music() -> String {
     slstatus::mpd().map_or(String::new(), |music| {
@@ -219,11 +116,45 @@ fn music() -> String {
     })
 }
 
-fn start() -> String {
-    " ".to_owned()
+pub struct Ctx(String);
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Self(String::from(" "))
+    }
 }
+
+impl Ctx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add<P: Into<String>>(&mut self, plugin: P) -> &mut Self {
+        {
+            self.0.push_str(plugin.into().as_str());
+        }
+        self
+    }
+
+    pub fn finish(&mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
 fn status(sys: &System) -> String {
-    start() + &music() + &plugged(sys) + &ram(sys) + &cpu(sys) + &cpu_heat(sys) + &date()
+    let cpu = Cpu::new(sys);
+    let mut ctx = Ctx::new();
+
+    ctx.add(get_spinner());
+    ctx.add(" ");
+    ctx.add(music());
+    ctx.add(network_speed(sys));
+    ctx.add(ram(sys));
+    ctx.add(cpu.load());
+    ctx.add(cpu.heat());
+    ctx.add(date());
+
+    ctx.finish()
 }
 
 use x11rb::wrapper::ConnectionExt;
@@ -253,7 +184,7 @@ fn run(_sdone: chan::Sender<()>, bar: &StatusBar) {
             banner = next_banner;
             bar.update(&banner);
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(80)); // prev: 500
     }
 }
 
@@ -261,6 +192,12 @@ fn main() {
     let bar = std::sync::Arc::new(StatusBar::new());
     let signal = chan_signal::notify(&[Signal::INT, Signal::TERM]);
     let (sdone, rdone) = chan::sync(0);
+
+    // Spawn the heartbeat thread [TICKER]
+    thread::spawn(|| loop {
+        TICKER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(80));
+    });
 
     let bar_run = bar.clone();
     std::thread::spawn(move || run(sdone, &bar_run));
@@ -274,9 +211,6 @@ fn main() {
         }
     }
 }
-
-// Remove ALL zbus imports and the NotifServer struct entirely.
-// Replace the channel + thread + zbus block in run() with this:
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
