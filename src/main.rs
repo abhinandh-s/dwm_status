@@ -94,21 +94,31 @@ impl Default for Spinner {
     }
 }
 
-// The global frame counter
-static TICKER: AtomicUsize = AtomicUsize::new(0);
 
 // Animation frames constant
 const SPINNER_FRAMES: &[&str] = &[" ", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"];
-
+//const SPINNER_FRAMES: &[&str] = &["    ", "=   ", "==  ", "=== ", " ===", "  ==", "   =", "    "];
+// const SPINNER_FRAMES: &[&str] = &["┤", "┘", "┴", "└", "├", "┌", "┬", "┐"]; // Snake
 // ["[    ]", "[=   ]", "[==  ]", "[=== ]", "[ ===]", "[  ==]", "[   =]", "[    ]"]
 // Bouncing ["[ ]", "[= ]", "[== ]", "[=== ]", "[ ===]", "[ ==]", "[ =]", "[ ]"]
 // [" ", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"]
-pub const SPINNER_FRAMES_2: &[&str] = &["○", "◎", "●", "◎"];
 
-fn get_spinner() -> &'static str {
-    let i = TICKER.load(std::sync::atomic::Ordering::Relaxed);
-    SPINNER_FRAMES[i % SPINNER_FRAMES.len()]
+pub fn get_spinner() -> &'static str {
+    // Get milliseconds since epoch
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    
+    // Divide by 80 to change frames every 80ms
+    let index = (ms / 80) as usize % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[index]
 }
+
+// pub const SPINNER_FRAMES: &[&str] = &["○", "◎", "●", "◎"];
+
+static STATE: AtomicUsize = AtomicUsize::new(0);
+
 
 fn music() -> String {
     slstatus::mpd().map_or(String::new(), |music| {
@@ -145,8 +155,6 @@ fn status(sys: &System) -> String {
     let cpu = Cpu::new(sys);
     let mut ctx = Ctx::new();
 
-    ctx.add(get_spinner());
-    ctx.add(" ");
     ctx.add(music());
     ctx.add(network_speed(sys));
     ctx.add(ram(sys));
@@ -184,7 +192,7 @@ fn run(_sdone: chan::Sender<()>, bar: &StatusBar) {
             banner = next_banner;
             bar.update(&banner);
         }
-        thread::sleep(Duration::from_millis(80)); // prev: 500
+        thread::sleep(Duration::from_millis(500)); // prev: 80
     }
 }
 
@@ -192,12 +200,6 @@ fn main() {
     let bar = std::sync::Arc::new(StatusBar::new());
     let signal = chan_signal::notify(&[Signal::INT, Signal::TERM]);
     let (sdone, rdone) = chan::sync(0);
-
-    // Spawn the heartbeat thread [TICKER]
-    thread::spawn(|| loop {
-        TICKER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        thread::sleep(Duration::from_millis(80));
-    });
 
     let bar_run = bar.clone();
     std::thread::spawn(move || run(sdone, &bar_run));
